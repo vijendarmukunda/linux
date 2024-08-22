@@ -1129,6 +1129,8 @@ static int loopback_parse_timer_id(const char *str,
 			}
 		}
 	}
+	if (card_idx == -1)
+		tid->dev_class = SNDRV_TIMER_CLASS_GLOBAL;
 	if (!err && tid) {
 		tid->card = card_idx;
 		tid->device = dev;
@@ -1896,7 +1898,7 @@ static int __init alsa_card_loopback_init(void)
 	}
 	if (!cards) {
 #ifdef MODULE
-		printk(KERN_ERR "aloop: No loopback enabled\n");
+		pr_err("aloop: No loopback enabled\n");
 #endif
 		loopback_unregister_all();
 		return -ENODEV;
