@@ -49,24 +49,6 @@ static inline int _soc_pcm_ret(struct snd_soc_pcm_runtime *rtd,
 	return ret;
 }
 
-static inline void snd_soc_dpcm_stream_lock_irq(struct snd_soc_pcm_runtime *rtd,
-						int stream)
-{
-	snd_pcm_stream_lock_irq(snd_soc_dpcm_get_substream(rtd, stream));
-}
-
-#define snd_soc_dpcm_stream_lock_irqsave_nested(rtd, stream, flags) \
-	snd_pcm_stream_lock_irqsave_nested(snd_soc_dpcm_get_substream(rtd, stream), flags)
-
-static inline void snd_soc_dpcm_stream_unlock_irq(struct snd_soc_pcm_runtime *rtd,
-						  int stream)
-{
-	snd_pcm_stream_unlock_irq(snd_soc_dpcm_get_substream(rtd, stream));
-}
-
-#define snd_soc_dpcm_stream_unlock_irqrestore(rtd, stream, flags) \
-	snd_pcm_stream_unlock_irqrestore(snd_soc_dpcm_get_substream(rtd, stream), flags)
-
 #define DPCM_MAX_BE_USERS	8
 
 static inline const char *soc_cpu_dai_name(struct snd_soc_pcm_runtime *rtd)
@@ -260,14 +242,14 @@ static void dpcm_set_fe_update_state(struct snd_soc_pcm_runtime *fe,
 	struct snd_pcm_substream *substream =
 		snd_soc_dpcm_get_substream(fe, stream);
 
-	snd_soc_dpcm_stream_lock_irq(fe, stream);
+	snd_pcm_stream_lock_irq(substream);
 	if (state == SND_SOC_DPCM_UPDATE_NO && fe->dpcm[stream].trigger_pending) {
 		dpcm_fe_dai_do_trigger(substream,
 				       fe->dpcm[stream].trigger_pending - 1);
 		fe->dpcm[stream].trigger_pending = 0;
 	}
 	fe->dpcm[stream].runtime_update = state;
-	snd_soc_dpcm_stream_unlock_irq(fe, stream);
+	snd_pcm_stream_unlock_irq(substream);
 }
 
 static void dpcm_set_be_update_state(struct snd_soc_pcm_runtime *be,
@@ -1272,10 +1254,10 @@ static int dpcm_be_connect(struct snd_soc_pcm_runtime *fe,
 	dpcm->be = be;
 	dpcm->fe = fe;
 	dpcm->state = SND_SOC_DPCM_LINK_STATE_NEW;
-	snd_soc_dpcm_stream_lock_irq(fe, stream);
+	snd_pcm_stream_lock_irq(fe_substream);
 	list_add(&dpcm->list_be, &fe->dpcm[stream].be_clients);
 	list_add(&dpcm->list_fe, &be->dpcm[stream].fe_clients);
-	snd_soc_dpcm_stream_unlock_irq(fe, stream);
+	snd_pcm_stream_unlock_irq(fe_substream);
 
 	dev_dbg(fe->dev, "connected new DPCM %s path %s %s %s\n",
 			snd_pcm_direction_name(stream),  fe->dai_link->name,
@@ -1320,11 +1302,12 @@ static void dpcm_be_reparent(struct snd_soc_pcm_runtime *fe,
 void dpcm_be_disconnect(struct snd_soc_pcm_runtime *fe, int stream)
 {
 	struct snd_soc_dpcm *dpcm, *d;
+	struct snd_pcm_substream *substream = snd_soc_dpcm_get_substream(fe, stream);
 	LIST_HEAD(deleted_dpcms);
 
 	snd_soc_dpcm_mutex_assert_held(fe);
 
-	snd_soc_dpcm_stream_lock_irq(fe, stream);
+	snd_pcm_stream_lock_irq(substream);
 	for_each_dpcm_be_safe(fe, stream, dpcm, d) {
 		dev_dbg(fe->dev, "ASoC: BE %s disconnect check for %s\n",
 				snd_pcm_direction_name(stream),
@@ -1343,7 +1326,7 @@ void dpcm_be_disconnect(struct snd_soc_pcm_runtime *fe, int stream)
 		list_del(&dpcm->list_be);
 		list_move(&dpcm->list_fe, &deleted_dpcms);
 	}
-	snd_soc_dpcm_stream_unlock_irq(fe, stream);
+	snd_pcm_stream_unlock_irq(substream);
 
 	while (!list_empty(&deleted_dpcms)) {
 		dpcm = list_first_entry(&deleted_dpcms, struct snd_soc_dpcm,
@@ -2155,7 +2138,7 @@ int dpcm_be_dai_trigger(struct snd_soc_pcm_runtime *fe, int stream,
 		be = dpcm->be;
 		be_substream = snd_soc_dpcm_get_substream(be, stream);
 
-		snd_soc_dpcm_stream_lock_irqsave_nested(be, stream, flags);
+		snd_pcm_stream_lock_irqsave_nested(be_substream, flags);
 
 		/* is this op for this BE ? */
 		if (!snd_soc_dpcm_be_can_update(fe, be, stream))
@@ -2302,7 +2285,7 @@ int dpcm_be_dai_trigger(struct snd_soc_pcm_runtime *fe, int stream,
 			break;
 		}
 next:
-		snd_soc_dpcm_stream_unlock_irqrestore(be, stream, flags);
+		snd_pcm_stream_unlock_irqrestore(be_substream, flags);
 		if (ret)
 			break;
 	}
@@ -2387,14 +2370,6 @@ static int dpcm_fe_dai_do_trigger(struct snd_pcm_substream *substream, int cmd)
 			ret = -EINVAL;
 			break;
 		}
-		break;
-	case SND_SOC_DPCM_TRIGGER_BESPOKE:
-		/* bespoke trigger() - handles both FE and BEs */
-
-		dev_dbg(fe->dev, "ASoC: bespoke trigger FE %s cmd %d\n",
-				fe->dai_link->name, cmd);
-
-		ret = snd_soc_pcm_dai_bespoke_trigger(substream, cmd);
 		break;
 	default:
 		dev_err(fe->dev, "ASoC: invalid trigger cmd %d for %s\n", cmd,
@@ -2525,26 +2500,12 @@ out:
 
 static int dpcm_run_update_shutdown(struct snd_soc_pcm_runtime *fe, int stream)
 {
-	struct snd_pcm_substream *substream =
-		snd_soc_dpcm_get_substream(fe, stream);
-	enum snd_soc_dpcm_trigger trigger = fe->dai_link->trigger[stream];
 	int err;
 
 	dev_dbg(fe->dev, "ASoC: runtime %s close on FE %s\n",
 		snd_pcm_direction_name(stream), fe->dai_link->name);
 
-	if (trigger == SND_SOC_DPCM_TRIGGER_BESPOKE) {
-		/* call bespoke trigger - FE takes care of all BE triggers */
-		dev_dbg(fe->dev, "ASoC: bespoke trigger FE %s cmd stop\n",
-				fe->dai_link->name);
-
-		err = snd_soc_pcm_dai_bespoke_trigger(substream, SNDRV_PCM_TRIGGER_STOP);
-	} else {
-		dev_dbg(fe->dev, "ASoC: trigger FE %s cmd stop\n",
-			fe->dai_link->name);
-
-		err = dpcm_be_dai_trigger(fe, stream, SNDRV_PCM_TRIGGER_STOP);
-	}
+	err = dpcm_be_dai_trigger(fe, stream, SNDRV_PCM_TRIGGER_STOP);
 
 	dpcm_be_dai_hw_free(fe, stream);
 
@@ -2558,10 +2519,7 @@ static int dpcm_run_update_shutdown(struct snd_soc_pcm_runtime *fe, int stream)
 
 static int dpcm_run_update_startup(struct snd_soc_pcm_runtime *fe, int stream)
 {
-	struct snd_pcm_substream *substream =
-		snd_soc_dpcm_get_substream(fe, stream);
 	struct snd_soc_dpcm *dpcm;
-	enum snd_soc_dpcm_trigger trigger = fe->dai_link->trigger[stream];
 	int ret = 0;
 
 	dev_dbg(fe->dev, "ASoC: runtime %s open on FE %s\n",
@@ -2605,23 +2563,9 @@ static int dpcm_run_update_startup(struct snd_soc_pcm_runtime *fe, int stream)
 		fe->dpcm[stream].state == SND_SOC_DPCM_STATE_STOP)
 		return 0;
 
-	if (trigger == SND_SOC_DPCM_TRIGGER_BESPOKE) {
-		/* call trigger on the frontend - FE takes care of all BE triggers */
-		dev_dbg(fe->dev, "ASoC: bespoke trigger FE %s cmd start\n",
-				fe->dai_link->name);
-
-		ret = snd_soc_pcm_dai_bespoke_trigger(substream, SNDRV_PCM_TRIGGER_START);
-		if (ret < 0)
-			goto hw_free;
-	} else {
-		dev_dbg(fe->dev, "ASoC: trigger FE %s cmd start\n",
-			fe->dai_link->name);
-
-		ret = dpcm_be_dai_trigger(fe, stream,
-					SNDRV_PCM_TRIGGER_START);
-		if (ret < 0)
-			goto hw_free;
-	}
+	ret = dpcm_be_dai_trigger(fe, stream, SNDRV_PCM_TRIGGER_START);
+	if (ret < 0)
+		goto hw_free;
 
 	return 0;
 
