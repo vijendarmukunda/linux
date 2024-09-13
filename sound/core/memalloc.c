@@ -17,7 +17,17 @@
 #include <asm/set_memory.h>
 #endif
 #include <sound/memalloc.h>
-#include "memalloc_local.h"
+
+struct snd_malloc_ops {
+	void *(*alloc)(struct snd_dma_buffer *dmab, size_t size);
+	void (*free)(struct snd_dma_buffer *dmab);
+	dma_addr_t (*get_addr)(struct snd_dma_buffer *dmab, size_t offset);
+	struct page *(*get_page)(struct snd_dma_buffer *dmab, size_t offset);
+	unsigned int (*get_chunk_size)(struct snd_dma_buffer *dmab,
+				       unsigned int ofs, unsigned int size);
+	int (*mmap)(struct snd_dma_buffer *dmab, struct vm_area_struct *area);
+	void (*sync)(struct snd_dma_buffer *dmab, enum snd_dma_sync_mode mode);
+};
 
 #define DEFAULT_GFP \
 	(GFP_KERNEL | \
@@ -657,7 +667,6 @@ static const struct snd_malloc_ops snd_dma_noncontig_ops = {
 #ifdef CONFIG_SND_DMA_SGBUF
 /* Fallback SG-buffer allocations for x86 */
 struct snd_dma_sg_fallback {
-	bool use_dma_alloc_coherent;
 	size_t count;
 	struct page **pages;
 	/* DMA address array; the first page contains #pages in ~PAGE_MASK */
@@ -677,13 +686,8 @@ static void __snd_dma_sg_fallback_free(struct snd_dma_buffer *dmab,
 			size = sgbuf->addrs[i] & ~PAGE_MASK;
 			if (WARN_ON(!size))
 				break;
-			if (sgbuf->use_dma_alloc_coherent)
-				dma_free_coherent(dmab->dev.dev, size << PAGE_SHIFT,
-						  page_address(sgbuf->pages[i]),
-						  sgbuf->addrs[i] & PAGE_MASK);
-			else
-				do_free_pages(page_address(sgbuf->pages[i]),
-					      size << PAGE_SHIFT, false);
+			do_free_pages(page_address(sgbuf->pages[i]),
+				      size << PAGE_SHIFT, false);
 			i += size;
 		}
 	}
@@ -705,7 +709,6 @@ static void *snd_dma_sg_fallback_alloc(struct snd_dma_buffer *dmab, size_t size)
 	sgbuf = kzalloc(sizeof(*sgbuf), GFP_KERNEL);
 	if (!sgbuf)
 		return NULL;
-	sgbuf->use_dma_alloc_coherent = cpu_feature_enabled(X86_FEATURE_XENPV);
 	size = PAGE_ALIGN(size);
 	sgbuf->count = size >> PAGE_SHIFT;
 	sgbuf->pages = kvcalloc(sgbuf->count, sizeof(*sgbuf->pages), GFP_KERNEL);
@@ -718,10 +721,7 @@ static void *snd_dma_sg_fallback_alloc(struct snd_dma_buffer *dmab, size_t size)
 	chunk = (PAGE_SIZE - 1) << PAGE_SHIFT; /* to fit in low bits in addrs */
 	while (size > 0) {
 		chunk = min(size, chunk);
-		if (sgbuf->use_dma_alloc_coherent)
-			p = dma_alloc_coherent(dmab->dev.dev, chunk, &addr, DEFAULT_GFP);
-		else
-			p = do_alloc_pages(dmab->dev.dev, chunk, &addr, false);
+		p = do_alloc_pages(dmab->dev.dev, chunk, &addr, false);
 		if (!p) {
 			if (chunk <= PAGE_SIZE)
 				goto error;
@@ -792,9 +792,6 @@ static void *snd_dma_sg_alloc(struct snd_dma_buffer *dmab, size_t size)
 {
 	int type = dmab->dev.type;
 	void *p;
-
-	if (cpu_feature_enabled(X86_FEATURE_XENPV))
-		return snd_dma_sg_fallback_alloc(dmab, size);
 
 	/* try the standard DMA API allocation at first */
 	if (type == SNDRV_DMA_TYPE_DEV_WC_SG)
